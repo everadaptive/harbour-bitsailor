@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 Zach Dunton
+# SPDX-License-Identifier: MIT
+
+[Unit]
+Description=BitSailor autofill provider
+After=dbus.socket
+
+[Service]
+Type=simple
+Environment=BITSAILOR_MODE=autofill-provider
+ExecStart=/usr/bin/harbour-bitsailor
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=user-session.target

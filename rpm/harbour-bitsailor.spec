@@ -37,6 +37,8 @@ BuildRequires:  pkgconfig(Qt5Quick)
 BuildRequires:  pkgconfig(sailfishsecrets)
 BuildRequires:  pkgconfig(sailfishcrypto)
 BuildRequires:  desktop-file-utils
+BuildRequires:  pkgconfig(Qt5DBus)
+BuildRequires:  qtchooser
 
 %description
 A Sailfish OS Bitwarden client
@@ -50,6 +52,9 @@ A Sailfish OS Bitwarden client
 
 %build
 # >> build pre
+# Generate the D-Bus adaptor of the autofill provider before qmake.
+(cd src/autofill && qdbusxml2cpp -a provideradaptor.h:provideradaptor.cpp -c ProviderAdaptor \
+    -i candidatetypes.h tech.everadaptive.Autofill1.Provider.xml)
 # << build pre
 
 %if 0%{?harbour_store}
@@ -70,6 +75,10 @@ rm -rf %{buildroot}
 %qmake5_install
 
 # >> install post
+%if 0%{?harbour_store} == 0
+mkdir -p %{buildroot}%{_userunitdir}/user-session.target.wants
+ln -s ../harbour-bitsailor-autofill.service %{buildroot}%{_userunitdir}/user-session.target.wants/harbour-bitsailor-autofill.service
+%endif
 %if 0%{?harbour_store}
 sed -i \
   -e '/^Sandboxing=Disabled$/d' \
@@ -95,6 +104,8 @@ desktop-file-install --delete-original       \
 %if 0%{?harbour_store} == 0
 %{_datadir}/polkit-1/actions/cz.chrastecky.bitsailor.policy
 %{_datadir}/dbus-1/services/cz.chrastecky.bitsailor.service
+%{_userunitdir}/harbour-bitsailor-autofill.service
+%{_userunitdir}/user-session.target.wants/harbour-bitsailor-autofill.service
 %endif
 # >> files
 # << files

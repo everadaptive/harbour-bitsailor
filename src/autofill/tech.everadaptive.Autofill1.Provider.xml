@@ -1,0 +1,73 @@
+<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+
+<!--
+SPDX-FileCopyrightText: 2026 Zach Dunton
+SPDX-License-Identifier: FSFAP
+-->
+
+<!--
+  tech.everadaptive.Autofill1.Provider
+
+  Implemented by the provider (a password manager) on its OWN bus name at the
+  fixed object path /tech/everadaptive/Autofill1/Provider.
+  The daemon is the only legitimate caller of these methods.
+  See ../tech.everadaptive.Autofill1.md §6.
+-->
+<node name="/tech/everadaptive/Autofill1">
+
+	<interface name="tech.everadaptive.Autofill1.Provider">
+
+		<!-- Same request dict as Session.GetCandidates, plus the reserved
+		     "autofill-session-id" key inserted by the daemon. Tokens returned
+		     here are opaque to the daemon and MUST be scoped to that session id.
+		     The reply is a struct: candidates plus a response dict which MAY
+		     carry "manual-fill-ticket" (s) when zero candidates matched. -->
+		<method name="GetCandidates">
+			<arg name="request" type="a{sv}" direction="in"/>
+			<annotation name="org.qtproject.QtDBus.QtTypeName.In0" value="QVariantMap"/>
+			<arg name="reply" type="(a(sa{sv})a{sv})" direction="out"/>
+			<annotation name="org.qtproject.QtDBus.QtTypeName.Out0" value="AutofillCandidatesReply"/>
+		</method>
+
+		<!-- Redeem a token for its credentials. One-shot. No hints argument —
+		     the daemon strips it (hints are a client-daemon concern in v1). -->
+		<method name="Resolve">
+			<arg name="token" type="s" direction="in"/>
+			<arg name="credentials" type="a{sv}" direction="out"/>
+			<annotation name="org.qtproject.QtDBus.QtTypeName.Out0" value="QVariantMap"/>
+		</method>
+
+		<!-- Ask the provider to show its own credential-selection UI for the
+		     session identified by the reserved autofill-session-id key in
+		     options. Tokens minted on selection MUST be scoped to that
+		     session and consumed by Resolve. -->
+		<method name="RequestManualFill">
+			<arg name="options" type="a{sv}" direction="in"/>
+			<annotation name="org.qtproject.QtDBus.QtTypeName.In0" value="QVariantMap"/>
+			<arg name="prompt" type="o" direction="out"/>
+		</method>
+
+		<!-- Request vault unlock. Returns the provider-owned prompt object path
+		     (on the provider's bus). The path must be valid immediately upon
+		     return; the unlock UI runs asynchronously. -->
+		<method name="Unlock">
+			<arg name="prompt" type="o" direction="out"/>
+		</method>
+
+		<property name="DisplayName" type="s" access="read"/>
+		<property name="Version" type="u" access="read"/>
+
+		<!-- The vault changed; daemon fans this out to live sessions and
+		     invalidates its per-session token records. -->
+		<signal name="CredentialsChanged">
+		</signal>
+
+		<!-- The daemon closed a session (client disconnect, timeout, explicit
+		     close). All tokens minted for this session id become invalid. -->
+		<signal name="SessionClosed">
+			<arg name="session_id" type="s"/>
+		</signal>
+
+	</interface>
+</node>

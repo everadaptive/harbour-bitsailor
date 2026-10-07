@@ -33,7 +33,11 @@ harbour_store {
     dbus.path = /usr/share/dbus-1/services
     dbus.files = dbus/*
 
-    INSTALLS += polkit dbus
+    # The autofill provider runs as a systemd user service.
+    provider_unit.path = /usr/lib/systemd/user
+    provider_unit.files = systemd/harbour-bitsailor-autofill.service
+
+    INSTALLS += polkit dbus provider_unit
 }
 
 bw-logo.path = /usr/share/harbour-bitsailor/icons
@@ -58,12 +62,18 @@ SOURCES += src/harbour-bitsailor.cpp \
     otp/onetimepasswordgenerator.cpp \
     src/urlparser.cpp \
     src/runtimecache.cpp \
-    src/uuid.cpp
+    src/uuid.cpp \
+    src/autofill/autofillmode.cpp \
+    src/autofill/autofillprovider.cpp \
+    src/autofill/urimatcher.cpp \
+    src/autofill/provideradaptor.cpp
 
 DISTFILES += qml/harbour-bitsailor.qml \
     icons/bw/* \
     polkit/cz.chrastecky.bitsailor.policy \
     dbus/* \
+    systemd/harbour-bitsailor-autofill.service \
+    src/autofill/tech.everadaptive.Autofill1.Provider.xml \
     qml/components/BottomMenu.qml \
     qml/components/BottomMenuItem.qml \
     qml/components/GeneratePassphraseContent.qml \
@@ -118,6 +128,11 @@ CONFIG += sailfishapp_i18n
 TRANSLATIONS += translations/harbour-bitsailor-*.ts
 
 HEADERS += \
+    src/autofill/autofillmode.h \
+    src/autofill/autofillprovider.h \
+    src/autofill/candidatetypes.h \
+    src/autofill/provideradaptor.h \
+    src/autofill/urimatcher.h \
     src/accountmanager.h \
     src/appsettings.h \
     src/bitwardeniteminput.h \

@@ -32,6 +32,7 @@
 #include "bitsailorcore.h"
 #include "clipboardhandler.h"
 #include "accountmanager.h"
+#include "autofill/autofillmode.h"
 
 namespace {
 
@@ -95,6 +96,24 @@ void messageHandler(QtMsgType type, const QMessageLogContext &context, const QSt
 
 int main(int argc, char *argv[])
 {
+    // Headless modes for the autofill provider. They skip the UI.
+    // BITSAILOR_MODE selects a mode without a command line argument. The
+    // secrets daemon identifies an application by its command line, so a
+    // plain command line keeps the same identity as the UI process.
+    const QByteArray mode = qgetenv("BITSAILOR_MODE");
+    bool provider = mode == "autofill-provider";
+    bool devLogin = mode == "autofill-dev-login";
+    for (int i = 1; i < argc; ++i) {
+        provider = provider || qstrcmp(argv[i], "--autofill-provider") == 0;
+        devLogin = devLogin || qstrcmp(argv[i], "--autofill-dev-login") == 0;
+    }
+    if (provider) {
+        return runAutofillProvider(argc, argv);
+    }
+    if (devLogin) {
+        return runAutofillDevLogin(argc, argv);
+    }
+
     QScopedPointer<QGuiApplication> app(SailfishApp::application(argc, argv));
     defaultMessageHandler = qInstallMessageHandler(messageHandler);
     QScopedPointer<QQuickView> v(SailfishApp::createView());
