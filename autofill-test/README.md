@@ -47,7 +47,11 @@ list.
   secrets of the UI app.
 - `BITSAILOR_AUTOFILL_ALLOWED_KEYIDS` limits the callers by rpm Key ID
   (comma separated). Without it, the provider accepts every signed caller.
-- Manual fill is not implemented. The provider dismisses the prompt.
+- The provider also supports saving and generating (protocol v2). The save
+  prompt needs the UI app. For a test without the UI, start the dev picker
+  with `BITSAILOR_MODE=autofill-dev-picker BITSAILOR_DEV_SAVE_ANSWER=save`
+  (or `decline`, `never`). `autofill-qml/tests/run-device-e2e.sh
+  bitsailor` does this and runs a full save, update, and fill sequence.
 - The provider unlocks the vault with the stored user key. The user must
   log in once, in the UI or with `--autofill-dev-login`.
 
