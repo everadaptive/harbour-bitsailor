@@ -21,6 +21,7 @@ ApplicationWindow {
     // True while the unlocked main page exists. The autofill picker needs it.
     property bool vaultOpen: false
     property var pickerPage: null
+    property var savePage: null
 
     id: app
 
@@ -46,6 +47,29 @@ ApplicationWindow {
                 pageStack.replace("pages/AutofillPickerPage.qml", request);
             } else {
                 pageStack.push("pages/AutofillPickerPage.qml", request);
+            }
+        };
+        pageStack.busy ? actionsWhenNotBusy.push(callable) : callable();
+    }
+
+    // Show the confirmation of a pending autofill save. Like the picker, it
+    // waits until the vault page is open. A locked app shows only its lock
+    // screen. The prompt holds no password.
+    function openSavePrompt() {
+        if (!autofillPicker.hasPendingSave()) {
+            return;
+        }
+
+        const callable = function() {
+            const request = autofillPicker.takePendingSave();
+            if (!request.requestId) {
+                return;
+            }
+
+            if (savePage !== null && pageStack.currentPage === savePage) {
+                pageStack.replace("pages/AutofillSavePage.qml", request);
+            } else {
+                pageStack.push("pages/AutofillSavePage.qml", request);
             }
         };
         pageStack.busy ? actionsWhenNotBusy.push(callable) : callable();
@@ -134,6 +158,14 @@ ApplicationWindow {
             app.activate();
             if (app.vaultOpen) {
                 app.openPicker();
+            }
+        }
+
+        // The save prompt waits until the vault page is open, like the picker.
+        onSavePromptRequested: {
+            app.activate();
+            if (app.vaultOpen) {
+                app.openSavePrompt();
             }
         }
     }

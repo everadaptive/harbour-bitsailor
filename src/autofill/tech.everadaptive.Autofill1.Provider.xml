@@ -55,7 +55,34 @@ SPDX-License-Identifier: FSFAP
 			<arg name="prompt" type="o" direction="out"/>
 		</method>
 
+		<!-- v2. Same request and credentials as Session.SaveCredentials, plus
+		     the reserved keys autofill-session-id and app-signature inserted
+		     by the daemon. The provider applies the origin and caller rules
+		     of GetCandidates (error OriginMismatch), shows its own
+		     confirmation UI, and returns the prompt path (on the provider's
+		     bus) at once. Needs Version 2. -->
+		<method name="SaveCredentials">
+			<arg name="request" type="a{sv}" direction="in"/>
+			<annotation name="org.qtproject.QtDBus.QtTypeName.In0" value="QVariantMap"/>
+			<arg name="credentials" type="a{sv}" direction="in"/>
+			<annotation name="org.qtproject.QtDBus.QtTypeName.In1" value="QVariantMap"/>
+			<arg name="prompt" type="o" direction="out"/>
+		</method>
+
+		<!-- v2. Same request and policy as Session.GeneratePassword. The
+		     provider MUST use a secure random source and MUST NOT store the
+		     result. Needs Version 2. -->
+		<method name="GeneratePassword">
+			<arg name="request" type="a{sv}" direction="in"/>
+			<annotation name="org.qtproject.QtDBus.QtTypeName.In0" value="QVariantMap"/>
+			<arg name="policy" type="a{sv}" direction="in"/>
+			<annotation name="org.qtproject.QtDBus.QtTypeName.In1" value="QVariantMap"/>
+			<arg name="result" type="a{sv}" direction="out"/>
+			<annotation name="org.qtproject.QtDBus.QtTypeName.Out0" value="QVariantMap"/>
+		</method>
+
 		<property name="DisplayName" type="s" access="read"/>
+		<!-- 1 = fill only. 2 = also implements SaveCredentials and GeneratePassword. -->
 		<property name="Version" type="u" access="read"/>
 
 		<!-- The vault changed; daemon fans this out to live sessions and

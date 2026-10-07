@@ -381,6 +381,9 @@ Page {
             if (autofillPicker.hasPending()) {
                 app.openPicker();
             }
+            if (autofillPicker.hasPendingSave()) {
+                app.openSavePrompt();
+            }
 
             pageStack.pushAttached("SettingsPage.qml");
             while (doAfterLoad.length) {

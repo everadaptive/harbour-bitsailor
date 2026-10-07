@@ -50,3 +50,21 @@ list.
 - Manual fill is not implemented. The provider dismisses the prompt.
 - The provider unlocks the vault with the stored user key. The user must
   log in once, in the UI or with `--autofill-dev-login`.
+
+## Host tests (`host/`)
+
+The tests in `host/` need no emulator, no Go core library, and no Sailfish
+secrets stack. They build the real autofill provider code
+(`src/autofill/autofillprovider.cpp` and its helpers) against a stub of
+`BitSailorCore` (`host/stub/bitsailorcore.h`) with Qt 6. The stub keeps the vault in memory.
+
+- `autofillsave_test`: unit test of `src/autofill/autofillsave.cpp` (origin
+  rules, item JSON for create and update, password policy).
+- `provider_v2.py`: integration test of `SaveCredentials` and
+  `GeneratePassword`. It starts the provider and a fake UI app. The fake UI
+  app runs the real `AutofillPickerService` and answers a save prompt like a
+  user. A Python client calls the provider.
+
+Run both with `host/run-host-tests.sh`. The tests do not cover the QML
+pages, the Go core, or the Qt 5.6 build of the target. Check those on the
+emulator (`autofill-test/e2e*.sh`).

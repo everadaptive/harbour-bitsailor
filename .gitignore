@@ -64,3 +64,4 @@ src/autofill/provideradaptor.cpp
 /documentation.list
 
 /autofill-test/server/
+/autofill-test/host/build-host/

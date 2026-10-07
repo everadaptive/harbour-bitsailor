@@ -35,13 +35,21 @@ QVariantMap AutofillPickerService::takePending()
     return pending;
 }
 
-void AutofillPickerService::ShowPicker(const QString &requestId, const QString &origin, const QString &appId)
+bool AutofillPickerService::callerIsProvider()
 {
-    // Only the autofill provider may open the picker.
     const auto owner = QDBusConnection::sessionBus().interface()->serviceOwner(QString::fromLatin1(providerService));
     if (!owner.isValid() || message().service() != owner.value()) {
         sendErrorReply(QStringLiteral("tech.everadaptive.Autofill1.Error.AccessDenied"),
                        QStringLiteral("only the autofill provider may open the picker"));
+        return false;
+    }
+    return true;
+}
+
+void AutofillPickerService::ShowPicker(const QString &requestId, const QString &origin, const QString &appId)
+{
+    // Only the autofill provider may open the picker.
+    if (!callerIsProvider()) {
         return;
     }
 
@@ -55,6 +63,47 @@ void AutofillPickerService::ShowPicker(const QString &requestId, const QString &
                  {QStringLiteral("origin"), origin},
                  {QStringLiteral("appId"), appId}};
     Q_EMIT pickerRequested();
+}
+
+void AutofillPickerService::ShowSavePrompt(const QString &requestId, const QString &origin, const QString &appId,
+                                           const QString &action, const QString &username, const QString &itemName)
+{
+    // Only the autofill provider may open the save prompt.
+    if (!callerIsProvider()) {
+        return;
+    }
+
+    // A new request replaces an unshown one. Tell the provider. Log no username.
+    if (!m_pendingSave.isEmpty()) {
+        answerSave(m_pendingSave.value(QStringLiteral("requestId")).toString(), QStringLiteral("decline"));
+    }
+
+    qInfo() << "autofill picker: save prompt requested for" << origin << "by" << appId << "action" << action;
+    m_pendingSave = {{QStringLiteral("requestId"), requestId},
+                     {QStringLiteral("origin"), origin},
+                     {QStringLiteral("appId"), appId},
+                     {QStringLiteral("action"), action},
+                     {QStringLiteral("username"), username},
+                     {QStringLiteral("itemName"), itemName}};
+    Q_EMIT savePromptRequested();
+}
+
+bool AutofillPickerService::hasPendingSave() const
+{
+    return !m_pendingSave.isEmpty();
+}
+
+QVariantMap AutofillPickerService::takePendingSave()
+{
+    const QVariantMap pending = m_pendingSave;
+    m_pendingSave.clear();
+    return pending;
+}
+
+void AutofillPickerService::answerSave(const QString &requestId, const QString &choice)
+{
+    qInfo() << "autofill picker: save answered:" << choice;
+    callProvider(QStringLiteral("SaveAnswered"), {requestId, choice});
 }
 
 void AutofillPickerService::report(const QString &message) const

@@ -58,7 +58,7 @@ int runAutofillProvider(int argc, char *argv[])
         return 1;
     }
 
-    auto provider = new AutofillProvider(core, &app);
+    auto provider = new AutofillProvider(core, settings, &app);
     (void)new ProviderAdaptor(provider);
     QDBusConnection::sessionBus().registerObject(QString::fromLatin1(providerPath), provider);
     // The UI app answers manual fill requests through this object.
@@ -166,9 +166,13 @@ int runAutofillDevPicker(int argc, char *argv[])
     QCoreApplication app(argc, argv);
     setApplicationNames(app);
 
+    // The dev picker stands in for the UI app. It answers a manual fill with
+    // BITSAILOR_DEV_PICK_ID, and a save prompt with BITSAILOR_DEV_SAVE_ANSWER
+    // (save, decline, or never). Set at least one of them.
     const QString itemId = envString("BITSAILOR_DEV_PICK_ID");
-    if (itemId.isEmpty()) {
-        qCritical() << "dev picker: set BITSAILOR_DEV_PICK_ID";
+    const QString saveAnswer = envString("BITSAILOR_DEV_SAVE_ANSWER");
+    if (itemId.isEmpty() && saveAnswer.isEmpty()) {
+        qCritical() << "dev picker: set BITSAILOR_DEV_PICK_ID or BITSAILOR_DEV_SAVE_ANSWER";
         return 2;
     }
 
@@ -178,9 +182,25 @@ int runAutofillDevPicker(int argc, char *argv[])
         const QVariantMap request = picker->takePending();
         qInfo() << "dev picker: picker requested for" << request.value(QStringLiteral("origin")).toString()
                 << "by" << request.value(QStringLiteral("appId")).toString();
+        if (itemId.isEmpty()) {
+            return;
+        }
         QTimer::singleShot(300, context, [=]() {
             picker->select(request.value(QStringLiteral("requestId")).toString(), itemId);
             qInfo() << "dev picker: selected" << itemId;
+        });
+    });
+    QObject::connect(picker, &AutofillPickerService::savePromptRequested, context, [=]() {
+        const QVariantMap request = picker->takePendingSave();
+        qInfo() << "dev picker: save prompt for" << request.value(QStringLiteral("origin")).toString()
+                << "by" << request.value(QStringLiteral("appId")).toString()
+                << "action" << request.value(QStringLiteral("action")).toString();
+        if (saveAnswer.isEmpty()) {
+            return;
+        }
+        QTimer::singleShot(300, context, [=]() {
+            picker->answerSave(request.value(QStringLiteral("requestId")).toString(), saveAnswer);
+            qInfo() << "dev picker: save answered" << saveAnswer;
         });
     });
 

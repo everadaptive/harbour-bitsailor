@@ -153,6 +153,24 @@ void AppSettings::setMigratedToMultiAccounts(bool value)
     emit migratedToMultiAccountsChanged();
 }
 
+QStringList AppSettings::autofillNeverSaveOrigins()
+{
+    // Another process may have changed the file.
+    settings->sync();
+    return settings->value(QStringLiteral("autofillNeverSave")).toStringList();
+}
+
+void AppSettings::addAutofillNeverSaveOrigin(const QString &origin)
+{
+    QStringList origins = autofillNeverSaveOrigins();
+    if (origins.contains(origin)) {
+        return;
+    }
+    origins.append(origin);
+    saveConfig(QStringLiteral("autofillNeverSave"), origins);
+    settings->sync();
+}
+
 void AppSettings::saveConfig(const QString &name, const QVariant &value)
 {
     settings->setValue(name, value);

@@ -23,7 +23,13 @@ constexpr qint64 ticketTtlMs = 5 * 60 * 1000;
 constexpr int manualFillTtlMs = 5 * 60 * 1000;
 constexpr int manualFillCallTimeoutMs = 30 * 1000;
 constexpr int refreshIntervalMs = 5 * 60 * 1000;
+constexpr int saveTtlMs = 5 * 60 * 1000;
+constexpr qint64 saveRateWindowMs = 60 * 1000;
+constexpr int saveRateLimit = 5; // save prompts for each app in the window
+constexpr int generateAttempts = 50;
 constexpr auto unsignedCaller = "(none)";
+
+static_assert(BitSailorCore::ItemTypeLogin == Autofill::LoginItemType, "the core uses another login item type");
 
 QString err(const char *code)
 {
@@ -38,8 +44,8 @@ QString newId()
 
 }
 
-AutofillProvider::AutofillProvider(BitSailorCore *core, QObject *parent)
-    : QObject(parent), m_core(core)
+AutofillProvider::AutofillProvider(BitSailorCore *core, AppSettings *settings, QObject *parent)
+    : QObject(parent), m_core(core), m_settings(settings)
 {
     const auto keyIds = QString::fromLocal8Bit(qgetenv("BITSAILOR_AUTOFILL_ALLOWED_KEYIDS"));
     for (const auto &keyId : keyIds.split(QLatin1Char(','), QString::SkipEmptyParts)) {
@@ -50,6 +56,10 @@ AutofillProvider::AutofillProvider(BitSailorCore *core, QObject *parent)
     connect(m_core, &BitSailorCore::unlockFinished, this, &AutofillProvider::onUnlockFinished);
     connect(m_core, &BitSailorCore::itemsResolved, this, &AutofillProvider::onItemsResolved);
     connect(m_core, &BitSailorCore::itemFetchFinished, this, &AutofillProvider::onItemFetched);
+    connect(m_core, &BitSailorCore::itemResolvingFailed, this, &AutofillProvider::onItemsFailed);
+    connect(m_core, &BitSailorCore::itemCreationFinished, this, &AutofillProvider::onItemCreated);
+    connect(m_core, &BitSailorCore::itemUpdated, this, &AutofillProvider::onItemUpdated);
+    connect(m_core, &BitSailorCore::passwordGeneratingFinished, this, &AutofillProvider::onPasswordGenerated);
 
     // The daemon sends SessionClosed when a session ends.
     QDBusConnection::sessionBus().connect(QString(),
@@ -70,7 +80,7 @@ QString AutofillProvider::displayName() const
 
 uint AutofillProvider::version() const
 {
-    return 1;
+    return 2; // spec §6: 2 = SaveCredentials and GeneratePassword
 }
 
 void AutofillProvider::start()
@@ -108,6 +118,11 @@ void AutofillProvider::onUnlockFinished(bool success, const QString &error)
     m_unlockPrompts.clear();
     for (const auto &path : prompts) {
         completePrompt(path, !success);
+    }
+
+    // On a success the saves resume when the item list arrives.
+    if (!success) {
+        declineWaitingSaves();
     }
 }
 
@@ -151,6 +166,22 @@ void AutofillProvider::onItemsResolved(const QJsonArray &items)
         m_tokens.clear();
         Q_EMIT CredentialsChanged();
     }
+
+    resumeWaitingSaves();
+    // The write of a save is complete when the new item list is here.
+    const auto active = m_saves.constFind(m_writeActive);
+    if (active != m_saves.constEnd() && active->state == SaveRequest::Refreshing) {
+        finishWrite(true);
+    }
+}
+
+void AutofillProvider::onItemsFailed()
+{
+    // The item list could not be read again. The write itself worked.
+    const auto active = m_saves.constFind(m_writeActive);
+    if (active != m_saves.constEnd() && active->state == SaveRequest::Refreshing) {
+        finishWrite(true);
+    }
 }
 
 bool AutofillProvider::callerAllowed(const QVariantMap &request, QString *reason) const
@@ -182,6 +213,13 @@ void AutofillProvider::pruneExpired()
     for (auto it = m_tickets.begin(); it != m_tickets.end();) {
         if (it->expiryMs < now) {
             it = m_tickets.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto it = m_filled.begin(); it != m_filled.end();) {
+        if (it->expiryMs < now) {
+            it = m_filled.erase(it);
         } else {
             ++it;
         }
@@ -250,6 +288,8 @@ QVariantMap AutofillProvider::Resolve(const QString &token)
 
     // One-shot: consume the token now. The password comes from the core.
     const QString itemId = found->itemId;
+    // A later save may name this item with the consumed token.
+    m_filled.insert(token, {found->sessionId, itemId, QDateTime::currentMSecsSinceEpoch() + tokenTtlMs});
     m_tokens.remove(token);
 
     const bool alreadyFetching = m_pendingResolves.contains(itemId);
@@ -269,10 +309,20 @@ void AutofillProvider::onItemFetched(bool success, const QJsonObject &item)
     if (success) {
         ids << item.value("id").toString();
     } else {
-        ids = m_pendingResolves.keys();
+        ids = m_pendingResolves.keys() + m_saveFetches.keys();
     }
 
     for (const auto &id : std::as_const(ids)) {
+        // The saves that wait for this item: unchanged, or ask for an update.
+        const auto saves = m_saveFetches.take(id);
+        for (const auto &saveId : saves) {
+            if (success) {
+                afterSaveFetch(saveId, item);
+            } else {
+                finishSave(saveId, QStringLiteral("failed"), false);
+            }
+        }
+
         const auto calls = m_pendingResolves.take(id);
         for (const auto &call : calls) {
             if (!success) {
@@ -303,7 +353,7 @@ QString AutofillProvider::newPrompt()
     return QStringLiteral("/tech/everadaptive/Autofill1/prompt/p%1").arg(++m_promptCounter);
 }
 
-void AutofillProvider::completePrompt(const QString &path, bool dismissed, const QString &result)
+void AutofillProvider::completePrompt(const QString &path, bool dismissed, const QVariant &result)
 {
     QDBusMessage signal = QDBusMessage::createSignal(path,
                                                      QStringLiteral("tech.everadaptive.Autofill1.Prompt"),
@@ -419,8 +469,433 @@ QString AutofillProvider::manualFillCancelled(const QString &requestId)
     return QString();
 }
 
+QDBusObjectPath AutofillProvider::SaveCredentials(const QVariantMap &request, const QVariantMap &credentials)
+{
+    const QString sessionId = request.value(QStringLiteral("autofill-session-id")).toString();
+    const QString requestOrigin = request.value(QStringLiteral("origin")).toString();
+    const QString email = credentials.value(QStringLiteral("email")).toString().trimmed();
+    QString username = credentials.value(QStringLiteral("username")).toString().trimmed();
+    if (username.isEmpty()) {
+        username = email;
+    }
+    const QString password = credentials.value(QStringLiteral("password")).toString();
+
+    // Never log a credential value, and never put one into an error text.
+    if (sessionId.isEmpty() || requestOrigin.isEmpty() || password.isEmpty()) {
+        sendErrorReply(err("InvalidArgs"), QStringLiteral("session id, origin, and password are required"));
+        return QDBusObjectPath();
+    }
+
+    // The caller rules of GetCandidates (spec §6, obligation 9).
+    QString reason;
+    if (!callerAllowed(request, &reason)) {
+        qWarning() << "autofill provider: SaveCredentials rejected:" << reason;
+        sendErrorReply(err("OriginMismatch"), reason);
+        return QDBusObjectPath();
+    }
+    const QString origin = Autofill::saveOrigin(requestOrigin);
+    if (origin.isEmpty()) {
+        qWarning() << "autofill provider: SaveCredentials rejected: origin cannot be saved:" << requestOrigin;
+        sendErrorReply(err("OriginMismatch"), QStringLiteral("the origin cannot be saved"));
+        return QDBusObjectPath();
+    }
+
+    // A hostile app could flood the user with prompts (spec §4.1).
+    const QString appId = request.value(QStringLiteral("app-id")).toString();
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    QVector<qint64> &times = m_saveTimes[request.value(QStringLiteral("app-signature")).toString() + QLatin1Char('/') + appId];
+    while (!times.isEmpty() && times.first() < now - saveRateWindowMs) {
+        times.removeFirst();
+    }
+    if (times.size() >= saveRateLimit) {
+        sendErrorReply(err("Busy"), QStringLiteral("too many save requests from this app"));
+        return QDBusObjectPath();
+    }
+    times.append(now);
+
+    SaveRequest save;
+    save.id = newId();
+    save.sessionId = sessionId;
+    save.promptPath = newPrompt();
+    save.requestOrigin = requestOrigin;
+    save.origin = origin;
+    save.appId = appId;
+    save.username = username;
+    save.email = email;
+    save.password = password;
+    save.filledToken = request.value(QStringLiteral("filled-token")).toString();
+    m_saves.insert(save.id, save);
+
+    // The path is valid at once. The work starts after the reply is sent, so
+    // that an immediate Completed signal follows the reply.
+    const QString id = save.id;
+    QTimer::singleShot(0, this, [this, id]() { startSave(id); });
+    QTimer::singleShot(saveTtlMs, this, [this, id]() { expireSave(id); });
+    qInfo() << "autofill provider: SaveCredentials for" << origin << "by" << appId;
+    return QDBusObjectPath(save.promptPath);
+}
+
+void AutofillProvider::startSave(const QString &id)
+{
+    const auto save = m_saves.find(id);
+    if (save == m_saves.end()) {
+        return;
+    }
+
+    // The user chose "Never for this site" earlier. No prompt.
+    if (m_settings->autofillNeverSaveOrigins().contains(save->origin)) {
+        finishSave(id, QStringLiteral("never"), true);
+        return;
+    }
+
+    if (m_status != BitSailorCore::SessionStatusUnlocked || !m_itemsLoaded) {
+        // A save needs the unlocked vault. Unlock without a UI, like Unlock().
+        // The save goes on when the item list arrives.
+        save->state = SaveRequest::WaitingUnlock;
+        if (m_status != BitSailorCore::SessionStatusUnlocked) {
+            if (!m_unlockRunning) {
+                m_unlockRunning = true;
+                m_core->unlockVault();
+            }
+        } else {
+            refreshItems();
+        }
+        return;
+    }
+    decideSave(id);
+}
+
+void AutofillProvider::resumeWaitingSaves()
+{
+    if (m_status != BitSailorCore::SessionStatusUnlocked || !m_itemsLoaded) {
+        return;
+    }
+    QStringList waiting;
+    for (auto it = m_saves.constBegin(); it != m_saves.constEnd(); ++it) {
+        if (it->state == SaveRequest::WaitingUnlock) {
+            waiting << it.key();
+        }
+    }
+    for (const auto &id : std::as_const(waiting)) {
+        decideSave(id);
+    }
+}
+
+void AutofillProvider::declineWaitingSaves()
+{
+    QStringList waiting;
+    for (auto it = m_saves.constBegin(); it != m_saves.constEnd(); ++it) {
+        if (it->state == SaveRequest::WaitingUnlock) {
+            waiting << it.key();
+        }
+    }
+    for (const auto &id : std::as_const(waiting)) {
+        finishSave(id, QStringLiteral("declined"), true);
+    }
+}
+
+bool AutofillProvider::entryExists(const QString &itemId) const
+{
+    for (const auto &entry : std::as_const(m_entries)) {
+        if (entry.id == itemId) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void AutofillProvider::decideSave(const QString &id)
+{
+    const auto save = m_saves.find(id);
+    if (save == m_saves.end()) {
+        return;
+    }
+
+    // The item that autofill filled comes first. Then an item with the same
+    // username and a URI that matches the origin of the request.
+    QString target;
+    const auto filled = m_filled.constFind(save->filledToken);
+    if (!save->filledToken.isEmpty() && filled != m_filled.constEnd()
+            && filled->sessionId == save->sessionId && entryExists(filled->itemId)) {
+        target = filled->itemId;
+    }
+    if (target.isEmpty()) {
+        for (const auto &entry : std::as_const(m_entries)) {
+            if (entry.username.compare(save->username, Qt::CaseInsensitive) != 0) {
+                continue;
+            }
+            for (const auto &uri : entry.uris) {
+                if (Autofill::uriMatches(save->requestOrigin, uri.first, uri.second)) {
+                    target = entry.id;
+                    break;
+                }
+            }
+            if (!target.isEmpty()) {
+                break;
+            }
+        }
+    }
+
+    if (target.isEmpty()) {
+        save->action = QStringLiteral("create");
+        save->itemName = Autofill::itemNameForOrigin(save->origin);
+        askSave(id);
+        return;
+    }
+
+    // Read the item: the same credentials end the save at once, and an update
+    // needs the complete item.
+    save->itemId = target;
+    save->state = SaveRequest::Fetching;
+    const bool alreadyFetching = m_pendingResolves.contains(target) || m_saveFetches.contains(target);
+    m_saveFetches[target].append(id);
+    if (!alreadyFetching) {
+        m_core->fetchItem(target);
+    }
+}
+
+void AutofillProvider::afterSaveFetch(const QString &id, const QJsonObject &item)
+{
+    const auto save = m_saves.find(id);
+    if (save == m_saves.end()) {
+        return;
+    }
+    if (Autofill::hasCredentials(item, save->username, save->password)) {
+        finishSave(id, QStringLiteral("unchanged"), false);
+        return;
+    }
+    save->item = item;
+    save->action = QStringLiteral("update");
+    save->itemName = item.value(QStringLiteral("name")).toString();
+    askSave(id);
+}
+
+void AutofillProvider::askSave(const QString &id)
+{
+    const auto save = m_saves.find(id);
+    if (save == m_saves.end()) {
+        return;
+    }
+    save->state = SaveRequest::Asking;
+
+    // The UI app shows the prompt. The call carries no password. The UI app
+    // answers through the ManualFillBridge object.
+    QDBusMessage call = QDBusMessage::createMethodCall(QStringLiteral("cz.chrastecky.bitsailor"),
+                                                       QStringLiteral("/autofill"),
+                                                       QStringLiteral("cz.chrastecky.bitsailor.AutofillPicker"),
+                                                       QStringLiteral("ShowSavePrompt"));
+    call.setArguments({id, save->origin, save->appId, save->action, save->username, save->itemName});
+    auto *watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(call, manualFillCallTimeoutMs), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, id]() {
+        const QDBusPendingReply<> reply = *watcher;
+        watcher->deleteLater();
+        if (reply.isError()) {
+            qWarning() << "autofill provider: could not open the save prompt:" << reply.error().message();
+            finishSave(id, QStringLiteral("declined"), true);
+        }
+    });
+}
+
+void AutofillProvider::expireSave(const QString &id)
+{
+    const auto save = m_saves.constFind(id);
+    if (save == m_saves.constEnd()) {
+        return;
+    }
+    // A save that the user accepted ends by itself.
+    if (save->state == SaveRequest::WriteQueued || save->state == SaveRequest::Writing
+            || save->state == SaveRequest::Refreshing) {
+        return;
+    }
+    finishSave(id, QStringLiteral("declined"), true);
+}
+
+QString AutofillProvider::saveAnswered(const QString &requestId, const QString &choice)
+{
+    const auto save = m_saves.find(requestId);
+    if (save == m_saves.end() || save->state != SaveRequest::Asking) {
+        return QStringLiteral("unknown or expired request");
+    }
+
+    if (choice == QLatin1String("save")) {
+        save->state = SaveRequest::WriteQueued;
+        m_writeQueue.append(requestId);
+        runNextWrite();
+    } else if (choice == QLatin1String("never")) {
+        m_settings->addAutofillNeverSaveOrigin(save->origin);
+        finishSave(requestId, QStringLiteral("never"), true);
+    } else if (choice == QLatin1String("decline")) {
+        finishSave(requestId, QStringLiteral("declined"), true);
+    } else {
+        return QStringLiteral("unknown choice");
+    }
+    return QString();
+}
+
+void AutofillProvider::runNextWrite()
+{
+    // The core reports no request id for a write. One write runs at a time.
+    while (m_writeActive.isEmpty() && !m_writeQueue.isEmpty()) {
+        const QString id = m_writeQueue.takeFirst();
+        const auto save = m_saves.find(id);
+        if (save == m_saves.end()) {
+            continue;
+        }
+        save->state = SaveRequest::Writing;
+        m_writeActive = id;
+        m_writeIsCreate = save->itemId.isEmpty();
+        if (m_writeIsCreate) {
+            m_core->createItem(Autofill::newLoginItem(save->origin, save->username, save->password, save->email));
+        } else {
+            m_core->updateItem(save->itemId, Autofill::withCredentials(save->item, save->username, save->password, save->email));
+        }
+    }
+}
+
+void AutofillProvider::onItemCreated(bool success)
+{
+    if (m_writeActive.isEmpty() || !m_writeIsCreate) {
+        return;
+    }
+    const auto save = m_saves.find(m_writeActive);
+    if (!success || save == m_saves.end()) {
+        finishWrite(false);
+        return;
+    }
+    // Read the item list again. The new login is a candidate from now on.
+    save->state = SaveRequest::Refreshing;
+    m_core->fetchItems();
+}
+
+void AutofillProvider::onItemUpdated(bool success)
+{
+    if (m_writeActive.isEmpty() || m_writeIsCreate) {
+        return;
+    }
+    const auto save = m_saves.find(m_writeActive);
+    if (!success || save == m_saves.end()) {
+        finishWrite(false);
+        return;
+    }
+    save->state = SaveRequest::Refreshing;
+    m_core->fetchItems();
+}
+
+void AutofillProvider::finishWrite(bool success)
+{
+    const QString id = m_writeActive;
+    const bool created = m_writeIsCreate;
+    m_writeActive.clear();
+    finishSave(id, success ? (created ? QStringLiteral("saved") : QStringLiteral("updated")) : QStringLiteral("failed"), false);
+    if (success) {
+        // Spec §6, obligation 13: the candidate lists of all sessions are stale.
+        Q_EMIT CredentialsChanged();
+    }
+    runNextWrite();
+}
+
+void AutofillProvider::finishSave(const QString &id, const QString &outcome, bool dismissed)
+{
+    const auto save = m_saves.find(id);
+    if (save == m_saves.end()) {
+        return;
+    }
+    const QString path = save->promptPath;
+    save->password.fill(QLatin1Char('\0')); // best effort, other copies may exist
+    m_saves.erase(save);
+    completePrompt(path, dismissed, QVariantMap{{QStringLiteral("outcome"), outcome}});
+}
+
+QVariantMap AutofillProvider::GeneratePassword(const QVariantMap &request, const QVariantMap &policy)
+{
+    if (request.value(QStringLiteral("origin")).toString().isEmpty()) {
+        sendErrorReply(err("InvalidArgs"), QStringLiteral("origin is required"));
+        return {};
+    }
+    QString reason;
+    if (!callerAllowed(request, &reason)) {
+        qWarning() << "autofill provider: GeneratePassword rejected:" << reason;
+        sendErrorReply(err("OriginMismatch"), reason);
+        return {};
+    }
+    Autofill::PasswordPolicy parsed;
+    if (!Autofill::parsePasswordPolicy(policy, &parsed)) {
+        sendErrorReply(err("PolicyViolation"), QStringLiteral("no character class is enabled"));
+        return {};
+    }
+
+    // The vault can be locked: generation needs no vault data (spec §4.1).
+    GenerateRequest generate;
+    generate.message = message();
+    generate.policy = parsed;
+    m_generateQueue.append(generate);
+    setDelayedReply(true);
+    runGenerate();
+    return {};
+}
+
+void AutofillProvider::runGenerate()
+{
+    // The core reports no request id. One generation runs at a time, so that
+    // a password never answers a call with another policy.
+    if (m_generateRunning || m_generateQueue.isEmpty()) {
+        return;
+    }
+    m_generateRunning = true;
+    const Autofill::PasswordPolicy &policy = m_generateQueue.first().policy;
+    m_core->generatePassword(policy.lowercase, policy.uppercase, policy.digits, policy.symbols,
+                             false, policy.digits ? 1 : 0, policy.symbols ? 1 : 0, policy.length);
+}
+
+void AutofillProvider::onPasswordGenerated(bool success, const QString &password)
+{
+    if (!m_generateRunning || m_generateQueue.isEmpty()) {
+        return;
+    }
+
+    GenerateRequest &generate = m_generateQueue.first();
+    if (success && Autofill::containsAny(password, generate.policy.excludeChars)
+            && ++generate.attempts < generateAttempts) {
+        // The core has no exclusion list. Generate again.
+        const Autofill::PasswordPolicy &policy = generate.policy;
+        m_core->generatePassword(policy.lowercase, policy.uppercase, policy.digits, policy.symbols,
+                                 false, policy.digits ? 1 : 0, policy.symbols ? 1 : 0, policy.length);
+        return;
+    }
+
+    const GenerateRequest done = m_generateQueue.takeFirst();
+    m_generateRunning = false;
+    if (success && !Autofill::containsAny(password, done.policy.excludeChars)) {
+        QDBusConnection::sessionBus().send(done.message.createReply(
+            QVariant::fromValue(QVariantMap{{QStringLiteral("password"), password}})));
+    } else {
+        QDBusConnection::sessionBus().send(done.message.createErrorReply(
+            err("PolicyViolation"), QStringLiteral("the password policy cannot be met")));
+    }
+    runGenerate();
+}
+
 void AutofillProvider::onSessionClosed(const QString &sessionId)
 {
+    // Drop the saves of the session that the user has not accepted yet. A save
+    // that is being written ends by itself.
+    const QStringList saveIds = m_saves.keys();
+    for (const auto &id : saveIds) {
+        const auto save = m_saves.constFind(id);
+        const bool writing = save->state == SaveRequest::WriteQueued || save->state == SaveRequest::Writing
+                || save->state == SaveRequest::Refreshing;
+        if (save->sessionId == sessionId && !writing) {
+            m_saves.remove(id);
+        }
+    }
+    for (auto it = m_filled.begin(); it != m_filled.end();) {
+        if (it->sessionId == sessionId) {
+            it = m_filled.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
     for (auto it = m_manualFills.begin(); it != m_manualFills.end();) {
         if (it->sessionId == sessionId) {
             it = m_manualFills.erase(it);
@@ -467,6 +942,17 @@ void ManualFillBridge::Selected(const QString &requestId, const QString &itemId)
         return;
     }
     const QString error = m_provider->manualFillSelected(requestId, itemId);
+    if (!error.isEmpty()) {
+        sendErrorReply(QStringLiteral("tech.everadaptive.Autofill1.Error.InvalidArgs"), error);
+    }
+}
+
+void ManualFillBridge::SaveAnswered(const QString &requestId, const QString &choice)
+{
+    if (!callerIsUi()) {
+        return;
+    }
+    const QString error = m_provider->saveAnswered(requestId, choice);
     if (!error.isEmpty()) {
         sendErrorReply(QStringLiteral("tech.everadaptive.Autofill1.Error.InvalidArgs"), error);
     }

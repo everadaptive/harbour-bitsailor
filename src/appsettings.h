@@ -37,6 +37,12 @@ public:
     bool migratedToMultiAccounts();
     void setMigratedToMultiAccounts(bool value);
 
+    // Origins for which the user chose "Never for this site" in the autofill
+    // save prompt. The autofill provider process reads and writes the list.
+    // The list is not a secret.
+    QStringList autofillNeverSaveOrigins();
+    void addAutofillNeverSaveOrigin(const QString &origin);
+
 signals:
     void lockOnCloseChanged();
     void useSystemAuthChanged();
