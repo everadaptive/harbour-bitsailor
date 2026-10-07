@@ -8,7 +8,7 @@ uses a local Vaultwarden server with seed data. Use test data only.
 - `start-vaultwarden.sh` runs Vaultwarden with a self-signed certificate on
   port 8222. The emulator reaches the host as `10.0.2.2`.
 - `seed-server.sh` registers the account `autofill@example.test` and adds
-  three logins (`register.py`, `seed.py`).
+  six logins (`register.py`, `seed.py`).
 - `setup-emulator.sh <rpm>` installs the RPM, logs in, starts the provider,
   and points the autofill daemon at it.
 - `run-e2e.sh` runs the QML client through the daemon and the provider.
@@ -17,9 +17,15 @@ uses a local Vaultwarden server with seed data. Use test data only.
 
 | Name | Username | URI |
 |------|----------|-----|
-| Demo app | alice | `app://autofill-demo` |
-| Example.com - Alice | alice | `https://example.com` |
+| Demo app | alice (email field: alice@example.com) | `app://autofill-demo` |
+| Example.com - Alice | alice (email field: alice@example.com) | `https://example.com` |
 | Example.com - Bob | bob | `https://example.com` |
+| GitHub | octocat-dev | `https://github.com` |
+| Fakesite.com - Charlie | charlie@fakesite.com (email-shaped, no email field) | `https://fakesite.com` |
+| Other app | carol | `app://org.example.otherapp` |
+
+Alice has a custom field named `email`. The provider returns it as `email`. The last three match no demo field. They show only in the "Search all logins…"
+list.
 
 ## Steps
 
@@ -28,7 +34,7 @@ uses a local Vaultwarden server with seed data. Use test data only.
 3. Build the RPM with `sfdk` (see `../../AGENTS.md`).
 4. Start the daemon stack once with `autofill-demo/scripts/seed.sh`.
 5. Run `./setup-emulator.sh <rpm>`.
-6. Run `./run-e2e.sh`. Expect `E2E resolved: alice demo-app-pass-1`.
+6. Run `./run-e2e.sh`. Expect `E2E resolved: alice demo-app-pass-1 alice@example.com`.
 
 ## Notes
 

@@ -64,6 +64,7 @@ SOURCES += src/harbour-bitsailor.cpp \
     src/runtimecache.cpp \
     src/uuid.cpp \
     src/autofill/autofillmode.cpp \
+    src/autofill/autofillpickerservice.cpp \
     src/autofill/autofillprovider.cpp \
     src/autofill/urimatcher.cpp \
     src/autofill/provideradaptor.cpp
@@ -88,6 +89,7 @@ DISTFILES += qml/harbour-bitsailor.qml \
     qml/cover/CoverPage.qml \
     qml/helpers.js \
     qml/pages/ApproveAuthRequestPage.qml \
+    qml/pages/AutofillPickerPage.qml \
     qml/pages/AccountSwitcherPage.qml \
     qml/pages/CleanupPage.qml \
     qml/pages/ConfirmOptionsSettingPage.qml \
@@ -129,6 +131,7 @@ TRANSLATIONS += translations/harbour-bitsailor-*.ts
 
 HEADERS += \
     src/autofill/autofillmode.h \
+    src/autofill/autofillpickerservice.h \
     src/autofill/autofillprovider.h \
     src/autofill/candidatetypes.h \
     src/autofill/provideradaptor.h \

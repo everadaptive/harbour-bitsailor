@@ -19,4 +19,9 @@ int runAutofillProvider(int argc, char *argv[]);
 // BITSAILOR_DEV_RESET=1 deletes the secrets collection and exits.
 int runAutofillDevLogin(int argc, char *argv[]);
 
+// --autofill-dev-picker: stand in for the UI app in tests. The process owns
+// the UI bus name, receives the picker request through the real
+// AutofillPickerService, and selects the item in BITSAILOR_DEV_PICK_ID.
+int runAutofillDevPicker(int argc, char *argv[]);
+
 #endif // AUTOFILLMODE_H

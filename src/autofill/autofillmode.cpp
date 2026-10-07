@@ -7,11 +7,13 @@
 #include <QDBusConnection>
 #include <QDebug>
 #include <QJsonObject>
+#include <QTimer>
 
 #include "../accountmanager.h"
 #include "../appsettings.h"
 #include "../bitsailorcore.h"
 #include "../secretshandler.h"
+#include "autofillpickerservice.h"
 #include "autofillprovider.h"
 #include "provideradaptor.h"
 
@@ -59,6 +61,10 @@ int runAutofillProvider(int argc, char *argv[])
     auto provider = new AutofillProvider(core, &app);
     (void)new ProviderAdaptor(provider);
     QDBusConnection::sessionBus().registerObject(QString::fromLatin1(providerPath), provider);
+    // The UI app answers manual fill requests through this object.
+    auto bridge = new ManualFillBridge(provider, &app);
+    QDBusConnection::sessionBus().registerObject(QStringLiteral("/cz/chrastecky/bitsailor/Autofill"), bridge,
+                                                 QDBusConnection::ExportAllSlots);
     provider->start();
 
     return app.exec();
@@ -152,5 +158,37 @@ int runAutofillDevLogin(int argc, char *argv[])
     });
 
     core->changeServerUrl(server);
+    return app.exec();
+}
+
+int runAutofillDevPicker(int argc, char *argv[])
+{
+    QCoreApplication app(argc, argv);
+    setApplicationNames(app);
+
+    const QString itemId = envString("BITSAILOR_DEV_PICK_ID");
+    if (itemId.isEmpty()) {
+        qCritical() << "dev picker: set BITSAILOR_DEV_PICK_ID";
+        return 2;
+    }
+
+    QObject *context = &app;
+    auto picker = new AutofillPickerService(context);
+    QObject::connect(picker, &AutofillPickerService::pickerRequested, context, [=]() {
+        const QVariantMap request = picker->takePending();
+        qInfo() << "dev picker: picker requested for" << request.value(QStringLiteral("origin")).toString()
+                << "by" << request.value(QStringLiteral("appId")).toString();
+        QTimer::singleShot(300, context, [=]() {
+            picker->select(request.value(QStringLiteral("requestId")).toString(), itemId);
+            qInfo() << "dev picker: selected" << itemId;
+        });
+    });
+
+    QDBusConnection::sessionBus().registerObject(QStringLiteral("/autofill"), picker, QDBusConnection::ExportAllSlots);
+    if (!QDBusConnection::sessionBus().registerService(QStringLiteral("cz.chrastecky.bitsailor"))) {
+        qCritical() << "dev picker: failed to register the UI bus name";
+        return 1;
+    }
+    qInfo() << "dev picker: ready";
     return app.exec();
 }

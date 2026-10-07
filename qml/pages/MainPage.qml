@@ -366,6 +366,8 @@ Page {
         }
     }
 
+    Component.onDestruction: app.vaultOpen = false
+
     onStatusChanged: {
         if (status == PageStatus.Active) {
             if (loaded && initialLoadCompleted) {
@@ -373,6 +375,12 @@ Page {
             }
 
             loaded = true;
+
+            // The vault is open. Show a waiting autofill picker request.
+            app.vaultOpen = true;
+            if (autofillPicker.hasPending()) {
+                app.openPicker();
+            }
 
             pageStack.pushAttached("SettingsPage.qml");
             while (doAfterLoad.length) {

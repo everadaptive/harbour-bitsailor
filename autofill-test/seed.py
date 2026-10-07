@@ -12,12 +12,12 @@ ITER = 600000
 ctx = ssl._create_unverified_context()
 b64 = lambda b: base64.b64encode(b).decode()
 
-def call(path, body=None, form=None, token=None):
+def call(path, body=None, form=None, token=None, method=None):
     data = urllib.parse.urlencode(form).encode() if form else (json.dumps(body).encode() if body is not None else None)
     h = {"Content-Type": "application/x-www-form-urlencoded" if form else "application/json"}
     if token:
         h["Authorization"] = "Bearer " + token
-    req = urllib.request.Request(BASE + path, data, h)
+    req = urllib.request.Request(BASE + path, data, h, method=method)
     try:
         with urllib.request.urlopen(req, context=ctx) as r:
             return json.loads(r.read().decode() or "null")
@@ -53,18 +53,45 @@ user_key = dec(stretched, key_str)
 access = tok["access_token"]
 
 existing = call("/api/ciphers", token=access)
-names = {dec(user_key, c["name"]).decode() for c in existing.get("data", [])}
+by_name = {dec(user_key, c["name"]).decode(): c for c in existing.get("data", [])}
 
-def add(name, user, pw, uri):
-    if name in names:
-        print("exists:", name); return
+def fields_for(email):
+    # A custom field named "email" carries an email apart from the username.
+    return [{"type": 0, "name": enc(user_key, "email"), "value": enc(user_key, email)}] if email else []
+
+def add(name, user, pw, uri, email=None):
+    old = by_name.get(name)
+    if old is not None:
+        # Update an existing item when the username, password or email differs.
+        login = old["login"]
+        old_email = ""
+        for f in old.get("fields") or []:
+            if f.get("name") and dec(user_key, f["name"]).decode().lower() == "email":
+                old_email = dec(user_key, f["value"]).decode()
+        same = (dec(user_key, login["username"]).decode() == user
+                and dec(user_key, login["password"]).decode() == pw
+                and old_email == (email or ""))
+        if same:
+            print("exists:", name); return
+        login["username"] = enc(user_key, user)
+        login["password"] = enc(user_key, pw)
+        old["fields"] = fields_for(email)
+        call("/api/ciphers/" + old["id"], token=access, body=old, method="PUT")
+        print("updated:", name); return
     call("/api/ciphers", token=access, body={
         "type": 1, "name": enc(user_key, name), "notes": None, "favorite": False, "folderId": None,
+        "fields": fields_for(email),
         "login": {"username": enc(user_key, user), "password": enc(user_key, pw), "totp": None,
                   "uris": [{"uri": enc(user_key, uri), "match": None}]}})
     print("created:", name)
 
-add("Demo app",            "alice", "demo-app-pass-1",  "app://autofill-demo")
-add("Example.com - Alice", "alice", "alice-example-pw", "https://example.com")
+add("Demo app",            "alice", "demo-app-pass-1",  "app://autofill-demo", "alice@example.com")
+add("Example.com - Alice", "alice", "alice-example-pw", "https://example.com", "alice@example.com")
 add("Example.com - Bob",   "bob",   "bob-example-pw",   "https://example.com")
-print("items in vault:", len(call("/api/ciphers", token=access)["data"]))
+add("GitHub",              "octocat-dev", "github-test-pw", "https://github.com")
+add("Fakesite.com - Charlie", "charlie@fakesite.com", "charlie-fakesite-pw", "https://fakesite.com")
+add("Other app",           "carol", "other-app-pass-1", "app://org.example.otherapp")
+final = call("/api/ciphers", token=access)["data"]
+print("items in vault:", len(final))
+for c in final:
+    print("  %s  %s" % (c["id"], dec(user_key, c["name"]).decode()))

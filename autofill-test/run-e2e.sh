@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 # Run the QML client through the daemon and the BitSailor provider.
-# Expect: "E2E resolved: alice demo-app-pass-1".
+# Expect: "E2E resolved: alice demo-app-pass-1 alice@example.com".
 set -e
 cd "$(dirname "$0")"
 KEY="$HOME/SailfishOS/vmshare/ssh/private_keys/sdk"

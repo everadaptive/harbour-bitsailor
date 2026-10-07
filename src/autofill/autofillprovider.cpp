@@ -4,6 +4,9 @@
 #include "autofillprovider.h"
 
 #include <QDBusConnection>
+#include <QDBusConnectionInterface>
+#include <QDBusPendingCallWatcher>
+#include <QDBusPendingReply>
 #include <QDBusVariant>
 #include <QDateTime>
 #include <QDebug>
@@ -17,6 +20,8 @@ namespace {
 
 constexpr qint64 tokenTtlMs = 10 * 60 * 1000;
 constexpr qint64 ticketTtlMs = 5 * 60 * 1000;
+constexpr int manualFillTtlMs = 5 * 60 * 1000;
+constexpr int manualFillCallTimeoutMs = 30 * 1000;
 constexpr int refreshIntervalMs = 5 * 60 * 1000;
 constexpr auto unsignedCaller = "(none)";
 
@@ -221,12 +226,12 @@ AutofillCandidatesReply AutofillProvider::GetCandidates(const QVariantMap &reque
     }
 
     qInfo() << "autofill provider: GetCandidates origin" << origin << "->" << reply.candidates.size() << "candidates";
-    if (reply.candidates.isEmpty()) {
-        // Spec §4: zero matches. Issue a session-bound, single-use ticket.
-        const QString ticket = newId();
-        m_tickets.insert(ticket, {sessionId, QDateTime::currentMSecsSinceEpoch() + ticketTtlMs});
-        reply.response.insert(QStringLiteral("manual-fill-ticket"), ticket);
-    }
+    // Issue a manual fill ticket on every request, so that the user can pick
+    // another login even when some logins matched. The ticket is
+    // session-bound and single-use.
+    const QString ticket = newId();
+    m_tickets.insert(ticket, {sessionId, QDateTime::currentMSecsSinceEpoch() + ticketTtlMs});
+    reply.response.insert(QStringLiteral("manual-fill-ticket"), ticket);
     return reply;
 }
 
@@ -278,6 +283,16 @@ void AutofillProvider::onItemFetched(bool success, const QJsonObject &item)
             const QJsonObject login = item.value("login").toObject();
             QVariantMap credentials{{QStringLiteral("username"), login.value("username").toString()},
                                     {QStringLiteral("password"), login.value("password").toString()}};
+            // A custom field named "email" carries an email address apart
+            // from the username.
+            for (const auto &fieldValue : item.value("fields").toArray()) {
+                const QJsonObject field = fieldValue.toObject();
+                if (field.value("name").toString().trimmed().toLower() == QLatin1String("email")
+                        && !field.value("value").toString().isEmpty()) {
+                    credentials.insert(QStringLiteral("email"), field.value("value").toString());
+                    break;
+                }
+            }
             QDBusConnection::sessionBus().send(call.createReply(QVariant::fromValue(credentials)));
         }
     }
@@ -288,12 +303,12 @@ QString AutofillProvider::newPrompt()
     return QStringLiteral("/tech/everadaptive/Autofill1/prompt/p%1").arg(++m_promptCounter);
 }
 
-void AutofillProvider::completePrompt(const QString &path, bool dismissed)
+void AutofillProvider::completePrompt(const QString &path, bool dismissed, const QString &result)
 {
     QDBusMessage signal = QDBusMessage::createSignal(path,
                                                      QStringLiteral("tech.everadaptive.Autofill1.Prompt"),
                                                      QStringLiteral("Completed"));
-    signal.setArguments({dismissed, QVariant::fromValue(QDBusVariant(QString()))});
+    signal.setArguments({dismissed, QVariant::fromValue(QDBusVariant(result))});
     QDBusConnection::sessionBus().send(signal);
 }
 
@@ -328,15 +343,91 @@ QDBusObjectPath AutofillProvider::RequestManualFill(const QVariantMap &options)
     }
     m_tickets.remove(ticket);
 
-    // The headless provider has no selection UI. Dismiss the prompt.
+    if (m_status != BitSailorCore::SessionStatusUnlocked || !m_itemsLoaded) {
+        sendErrorReply(err("VaultLocked"), QStringLiteral("the vault is locked"));
+        return QDBusObjectPath();
+    }
+
+    // The path is valid at once. The UI app shows the picker. It reports the
+    // choice through the ManualFillBridge object.
     const QString path = newPrompt();
-    qInfo() << "autofill provider: manual fill is not supported in the headless provider";
-    QTimer::singleShot(100, this, [this, path]() { completePrompt(path, true); });
+    const QString requestId = newId();
+    m_manualFills.insert(requestId, {sessionId, path});
+    QTimer::singleShot(manualFillTtlMs, this, [this, requestId]() { expireManualFill(requestId); });
+
+    QDBusMessage call = QDBusMessage::createMethodCall(QStringLiteral("cz.chrastecky.bitsailor"),
+                                                       QStringLiteral("/autofill"),
+                                                       QStringLiteral("cz.chrastecky.bitsailor.AutofillPicker"),
+                                                       QStringLiteral("ShowPicker"));
+    call.setArguments({requestId,
+                       options.value(QStringLiteral("origin")).toString(),
+                       options.value(QStringLiteral("app-id")).toString()});
+    auto *watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(call, manualFillCallTimeoutMs), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, requestId]() {
+        const QDBusPendingReply<> reply = *watcher;
+        watcher->deleteLater();
+        if (reply.isError()) {
+            qWarning() << "autofill provider: could not open the picker:" << reply.error().message();
+            expireManualFill(requestId);
+        }
+    });
+    qInfo() << "autofill provider: manual fill requested, picker requested from the UI app";
     return QDBusObjectPath(path);
+}
+
+void AutofillProvider::expireManualFill(const QString &requestId)
+{
+    const auto fill = m_manualFills.take(requestId);
+    if (!fill.promptPath.isEmpty()) {
+        completePrompt(fill.promptPath, true);
+    }
+}
+
+QString AutofillProvider::manualFillSelected(const QString &requestId, const QString &itemId)
+{
+    const auto found = m_manualFills.constFind(requestId);
+    if (found == m_manualFills.constEnd()) {
+        return QStringLiteral("unknown or expired request");
+    }
+
+    bool known = false;
+    for (const auto &entry : std::as_const(m_entries)) {
+        if (entry.id == itemId) {
+            known = true;
+            break;
+        }
+    }
+    if (!known) {
+        return QStringLiteral("unknown item");
+    }
+
+    // The token follows the same rules as a token from GetCandidates.
+    const QString token = newId();
+    m_tokens.insert(token, {found->sessionId, itemId, QDateTime::currentMSecsSinceEpoch() + tokenTtlMs});
+    const QString path = found->promptPath;
+    m_manualFills.remove(requestId);
+    completePrompt(path, false, token);
+    return QString();
+}
+
+QString AutofillProvider::manualFillCancelled(const QString &requestId)
+{
+    if (!m_manualFills.contains(requestId)) {
+        return QStringLiteral("unknown or expired request");
+    }
+    expireManualFill(requestId);
+    return QString();
 }
 
 void AutofillProvider::onSessionClosed(const QString &sessionId)
 {
+    for (auto it = m_manualFills.begin(); it != m_manualFills.end();) {
+        if (it->sessionId == sessionId) {
+            it = m_manualFills.erase(it);
+        } else {
+            ++it;
+        }
+    }
     for (auto it = m_tokens.begin(); it != m_tokens.end();) {
         if (it->sessionId == sessionId) {
             it = m_tokens.erase(it);
@@ -350,5 +441,44 @@ void AutofillProvider::onSessionClosed(const QString &sessionId)
         } else {
             ++it;
         }
+    }
+}
+
+ManualFillBridge::ManualFillBridge(AutofillProvider *provider, QObject *parent)
+    : QObject(parent), m_provider(provider)
+{
+}
+
+bool ManualFillBridge::callerIsUi()
+{
+    // The UI app owns this name. Any other caller is refused.
+    const auto owner = QDBusConnection::sessionBus().interface()->serviceOwner(QStringLiteral("cz.chrastecky.bitsailor"));
+    if (!owner.isValid() || message().service() != owner.value()) {
+        sendErrorReply(QStringLiteral("tech.everadaptive.Autofill1.Error.AccessDenied"),
+                       QStringLiteral("only the BitSailor app may answer a manual fill"));
+        return false;
+    }
+    return true;
+}
+
+void ManualFillBridge::Selected(const QString &requestId, const QString &itemId)
+{
+    if (!callerIsUi()) {
+        return;
+    }
+    const QString error = m_provider->manualFillSelected(requestId, itemId);
+    if (!error.isEmpty()) {
+        sendErrorReply(QStringLiteral("tech.everadaptive.Autofill1.Error.InvalidArgs"), error);
+    }
+}
+
+void ManualFillBridge::Cancelled(const QString &requestId)
+{
+    if (!callerIsUi()) {
+        return;
+    }
+    const QString error = m_provider->manualFillCancelled(requestId);
+    if (!error.isEmpty()) {
+        sendErrorReply(QStringLiteral("tech.everadaptive.Autofill1.Error.InvalidArgs"), error);
     }
 }

@@ -33,6 +33,7 @@
 #include "clipboardhandler.h"
 #include "accountmanager.h"
 #include "autofill/autofillmode.h"
+#include "autofill/autofillpickerservice.h"
 
 namespace {
 
@@ -103,6 +104,7 @@ int main(int argc, char *argv[])
     const QByteArray mode = qgetenv("BITSAILOR_MODE");
     bool provider = mode == "autofill-provider";
     bool devLogin = mode == "autofill-dev-login";
+    const bool devPicker = mode == "autofill-dev-picker";
     for (int i = 1; i < argc; ++i) {
         provider = provider || qstrcmp(argv[i], "--autofill-provider") == 0;
         devLogin = devLogin || qstrcmp(argv[i], "--autofill-dev-login") == 0;
@@ -112,6 +114,9 @@ int main(int argc, char *argv[])
     }
     if (devLogin) {
         return runAutofillDevLogin(argc, argv);
+    }
+    if (devPicker) {
+        return runAutofillDevPicker(argc, argv);
     }
 
     QScopedPointer<QGuiApplication> app(SailfishApp::application(argc, argv));
@@ -142,6 +147,12 @@ int main(int argc, char *argv[])
     });
 
     auto clipboardHandler = new ClipboardHandler(QGuiApplication::clipboard(), settings, app.data());
+
+    // The autofill provider opens the login picker through this object.
+    auto autofillPicker = new AutofillPickerService(app.data());
+    QDBusConnection::sessionBus().registerObject(QStringLiteral("/autofill"), autofillPicker,
+                                                 QDBusConnection::ExportAllSlots);
+    v->rootContext()->setContextProperty("autofillPicker", autofillPicker);
 
     v->rootContext()->setContextProperty("accountManager", accountManager);
     v->rootContext()->setContextProperty("clipboardHandler", clipboardHandler);

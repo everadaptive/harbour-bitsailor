@@ -23,7 +23,7 @@ Item {
             }
         }
         onResolved: {
-            console.log("E2E resolved:", username, password)
+            console.log("E2E resolved:", username, password, email)
             c.closeSession()
             Qt.quit()
         }

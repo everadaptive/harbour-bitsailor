@@ -41,6 +41,11 @@ public:
     // Read the session state and unlock the vault.
     void start();
 
+    // Called by the manual fill bridge when the UI app answers. Both return
+    // an empty string on success and an error code otherwise.
+    QString manualFillSelected(const QString &requestId, const QString &itemId);
+    QString manualFillCancelled(const QString &requestId);
+
 public Q_SLOTS:
     AutofillCandidatesReply GetCandidates(const QVariantMap &request);
     QVariantMap Resolve(const QString &token);
@@ -77,10 +82,17 @@ private:
         QString sessionId;
         qint64 expiryMs = 0;
     };
+    // A manual fill waits for the UI app to return the user's choice.
+    struct ManualFill
+    {
+        QString sessionId;
+        QString promptPath;
+    };
 
     bool callerAllowed(const QVariantMap &request, QString *reason) const;
     QString newPrompt();
-    void completePrompt(const QString &path, bool dismissed);
+    void completePrompt(const QString &path, bool dismissed, const QString &result = QString());
+    void expireManualFill(const QString &requestId);
     void pruneExpired();
 
     BitSailorCore *m_core;
@@ -91,10 +103,31 @@ private:
     QHash<QString, Token> m_tokens;
     QHash<QString, Ticket> m_tickets;
     QHash<QString, QVector<QDBusMessage>> m_pendingResolves; // item id -> waiting calls
+    QHash<QString, ManualFill> m_manualFills;                 // request id -> waiting prompt
     QStringList m_unlockPrompts;
     QSet<QString> m_allowedKeyIds; // empty: accept every signed caller
     QTimer m_refreshTimer;
     int m_promptCounter = 0;
+};
+
+// D-Bus object for the BitSailor UI app. The UI app reports the login that
+// the user picked for a manual fill. Only the UI app may call it.
+class ManualFillBridge : public QObject, protected QDBusContext
+{
+    Q_OBJECT
+    Q_CLASSINFO("D-Bus Interface", "cz.chrastecky.bitsailor.AutofillControl")
+
+public:
+    explicit ManualFillBridge(AutofillProvider *provider, QObject *parent = nullptr);
+
+public Q_SLOTS:
+    void Selected(const QString &requestId, const QString &itemId);
+    void Cancelled(const QString &requestId);
+
+private:
+    bool callerIsUi();
+
+    AutofillProvider *m_provider;
 };
 
 #endif // AUTOFILLPROVIDER_H

@@ -18,6 +18,9 @@ ApplicationWindow {
     property string fileToShare
     property string textToShare
     property bool invalidCertsAllowed: secrets.invalidCertificatesAllowed()
+    // True while the unlocked main page exists. The autofill picker needs it.
+    property bool vaultOpen: false
+    property var pickerPage: null
 
     id: app
 
@@ -26,6 +29,27 @@ ApplicationWindow {
     allowedOrientations: defaultAllowedOrientations
 
     onInvalidCertsAllowedChanged: core.initialize();
+
+    // Show the login picker for a pending manual fill request.
+    function openPicker() {
+        if (!autofillPicker.hasPending()) {
+            return;
+        }
+
+        const callable = function() {
+            const request = autofillPicker.takePending();
+            if (!request.requestId) {
+                return;
+            }
+
+            if (pickerPage !== null && pageStack.currentPage === pickerPage) {
+                pageStack.replace("pages/AutofillPickerPage.qml", request);
+            } else {
+                pageStack.push("pages/AutofillPickerPage.qml", request);
+            }
+        };
+        pageStack.busy ? actionsWhenNotBusy.push(callable) : callable();
+    }
 
     function clearAfterTimeout(text) {
         clearClipboardTimer.triggered();
@@ -104,7 +128,20 @@ ApplicationWindow {
     }
 
     Connections {
+        target: autofillPicker
+
+        onPickerRequested: {
+            app.activate();
+            if (app.vaultOpen) {
+                app.openPicker();
+            }
+        }
+    }
+
+    Connections {
         target: core
+
+        onVaultLocked: app.vaultOpen = false
 
         onAuthRequestApprovalRequested: {
             authRequestNotification.requestId = requestId;
